@@ -112,7 +112,7 @@ func latency(localAddr string, remoteHost string, port uint16) time.Duration {
 		wg.Done()
 	}()
 
-	time.Sleep(1 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 	sendTime := sendSyn(localAddr, remoteAddr, port)
 
 	wg.Wait()
@@ -154,7 +154,13 @@ func interfaceAddress(ifaceName string) net.Addr {
 	if err != nil {
 		log.Fatalf("iface.Addrs: %s", err)
 	}
-	return addrs[0]
+	for _, addr := range addrs {
+		if v4ip := addr.(*net.IPNet).IP.To4(); v4ip != nil {
+			return addr
+		}
+	}
+	log.Fatalf("no IPv4 addr is found")
+	return nil
 }
 
 func printHelp() {
@@ -230,12 +236,15 @@ func receiveSynAck(localAddress, remoteAddress string) time.Time {
 		log.Fatalf("net.ResolveIPAddr: %s. %s\n", localAddress, netaddr)
 	}
 
+	fmt.Printf("listening on %v\n", netaddr)
+
 	conn, err := net.ListenIP("ip4:tcp", netaddr)
 	if err != nil {
 		log.Fatalf("ListenIP: %s\n", err)
 	}
 	var receiveTime time.Time
 	for {
+		fmt.Printf("waiting for response from: %s\n", remoteAddress)
 		buf := make([]byte, 1024)
 		numRead, raddr, err := conn.ReadFrom(buf)
 		if err != nil {
@@ -243,7 +252,8 @@ func receiveSynAck(localAddress, remoteAddress string) time.Time {
 		}
 		if raddr.String() != remoteAddress {
 			// this is not the packet we are looking for
-			continue
+			fmt.Printf("received from %s\n", raddr.String())
+			break
 		}
 		receiveTime = time.Now()
 		//fmt.Printf("Received: % x\n", buf[:numRead])
