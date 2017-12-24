@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 var (
@@ -34,6 +36,7 @@ var (
 	helpParam    = flag.Bool("h", false, "Print help")
 	portParam    = flag.Int("p", 80, "Port to test against (default 80)")
 	autoParam    = flag.Bool("a", false, "Measure latency to several well known addresses")
+	ttlParam     = flag.Int("t", 64, "TTL to use when sending the SYN")
 	defaultHosts = map[string]string{
 		// Busiest sites on the Internet, according to Wolfram Alpha
 		"Google":   "google.com",
@@ -132,7 +135,7 @@ func chooseInterface() string {
 		addrs, err := iface.Addrs()
 		// Skip if error getting addresses
 		if err != nil {
-			log.Println("Error get addresses for interfaces %s. %s", iface.Name, err)
+			log.Printf("Error get addresses for interfaces %s. %s\n", iface.Name, err)
 			continue
 		}
 
@@ -202,6 +205,11 @@ func sendSyn(laddr, raddr string, port uint16) time.Time {
 	if err != nil {
 		log.Fatalf("Dial: %s\n", err)
 	}
+	defer conn.Close()
+
+	// change TTL
+	traceConn := ipv4.NewConn(conn)
+	traceConn.SetTTL(*ttlParam)
 
 	sendTime := time.Now()
 
@@ -212,8 +220,6 @@ func sendSyn(laddr, raddr string, port uint16) time.Time {
 	if numWrote != len(data) {
 		log.Fatalf("Short write. Wrote %d/%d bytes\n", numWrote, len(data))
 	}
-
-	conn.Close()
 
 	return sendTime
 }
