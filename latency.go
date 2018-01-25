@@ -17,6 +17,7 @@ For full license details see <http://www.gnu.org/licenses/>.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -28,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
 
@@ -53,6 +55,7 @@ var (
 		"New Zealand":  "nzdsl.co.nz",
 		"South Africa": "speedtest.mybroadband.co.za",
 	}
+	IPv4ICMPProtocolNum = 1
 )
 
 func main() {
@@ -110,8 +113,18 @@ func latency(localAddr string, remoteHost string, port uint16) time.Duration {
 	}
 	remoteAddr := addrs[0]
 
+	ctxt, cancel := context.WithCancel(context.Background())
+
 	go func() {
 		receiveTime = receiveSynAck(localAddr, remoteAddr)
+		// call cancel here to stop the ICMP receiver
+		cancel()
+		wg.Done()
+	}()
+
+	wg.Add(1)
+	go func() {
+		receiveICMP(ctxt, localAddr)
 		wg.Done()
 	}()
 
@@ -168,11 +181,12 @@ func interfaceAddress(ifaceName string) net.Addr {
 
 func printHelp() {
 	help := `
-	USAGE: latency [-h] [-a] [-i iface] [-p port] <remote>
+	USAGE: latency [-h] [-a] [-i iface] [-p port] [-t ttl] <remote>
 	Where 'remote' is an ip address or host name.
 	Default port is 80
 	-h: Help
 	-a: Run auto test against several well known sites
+	-t: Set TTL of the SYN packet
 	`
 	fmt.Println(help)
 }
@@ -236,6 +250,39 @@ func to4byte(addr string) [4]byte {
 	return [4]byte{byte(b0), byte(b1), byte(b2), byte(b3)}
 }
 
+func receiveICMP(ctxt context.Context, localAddress string) {
+	netaddr, err := net.ResolveIPAddr("ip4", localAddress)
+	if err != nil {
+		log.Fatalf("net.ResolveIPAddr: %s. %s\n", localAddress, netaddr)
+	}
+
+	fmt.Printf("listening ICMP on %v\n", netaddr)
+	conn, err := icmp.ListenPacket("ip4:icmp", netaddr.String())
+	if err != nil {
+		log.Fatalf("ListenIP: %s\n", err)
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 1500)
+	for ctxt.Err() == nil {
+		numRead, raddr, err := conn.ReadFrom(buf)
+		if err != nil {
+			log.Fatalf("ReadFrom: %s\n", err)
+		}
+
+		msg, err := icmp.ParseMessage(IPv4ICMPProtocolNum, buf[:numRead])
+		if err != nil {
+			log.Fatalf("ParseMessage: %s\n", err)
+		}
+		switch msg.Type {
+		case ipv4.ICMPTypeTimeExceeded:
+			log.Printf("got TTL exceeded from %v", raddr)
+		default:
+			log.Printf("got %+v from %v; want TTL exceeded reply", msg, raddr)
+		}
+	}
+}
+
 func receiveSynAck(localAddress, remoteAddress string) time.Time {
 	netaddr, err := net.ResolveIPAddr("ip4", localAddress)
 	if err != nil {
@@ -249,23 +296,24 @@ func receiveSynAck(localAddress, remoteAddress string) time.Time {
 		log.Fatalf("ListenIP: %s\n", err)
 	}
 	var receiveTime time.Time
+	fmt.Printf("waiting for response from: %s\n", remoteAddress)
+	buf := make([]byte, 1024)
+
 	for {
-		fmt.Printf("waiting for response from: %s\n", remoteAddress)
-		buf := make([]byte, 1024)
 		numRead, raddr, err := conn.ReadFrom(buf)
 		if err != nil {
 			log.Fatalf("ReadFrom: %s\n", err)
 		}
 		if raddr.String() != remoteAddress {
 			// this is not the packet we are looking for
-			fmt.Printf("received from %s\n", raddr.String())
-			break
+			// fmt.Printf("received from %s\n", raddr.String())
+			continue
 		}
-		receiveTime = time.Now()
-		//fmt.Printf("Received: % x\n", buf[:numRead])
 		tcp := NewTCPHeader(buf[:numRead])
 		// Closed port gets RST, open port gets SYN ACK
 		if tcp.HasFlag(RST) || (tcp.HasFlag(SYN) && tcp.HasFlag(ACK)) {
+			receiveTime = time.Now()
+			fmt.Printf("Received: %x\n", buf[:numRead])
 			break
 		}
 	}
